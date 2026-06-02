@@ -218,8 +218,8 @@ class _HomePageState extends State<HomePage> {
     }
 
     // Barcode bars.
-    const barTop = 32;
-    const barH = 50;
+    const barTop = 30;
+    const barH = 44;
     page.addBarcode(
       code,
       BarcodeOptions(
@@ -233,13 +233,13 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    // Number — tucked right under (slightly into) the bars, no gap.
+    // Number — large, tucked right under (slightly into) the bars, no gap.
     await page.addText(
       code,
       TextOptions(
         x: w ~/ 2,
-        y: oy + barTop + barH - 2,
-        fontSize: 15,
+        y: oy + barTop + barH - 4,
+        fontSize: 22,
         fontWeight: FontWeight.bold,
         align: HAlignment.center,
         vAlign: VAlignment.top,

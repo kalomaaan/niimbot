@@ -1,7 +1,7 @@
 name: niimbot_b1
 description: Minimal Flutter app to connect to a NIIMBOT B1 over BLE and print a test label.
 publish_to: "none"
-version: 2.0.0+10
+version: 2.0.1+11
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
