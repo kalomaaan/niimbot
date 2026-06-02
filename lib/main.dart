@@ -55,6 +55,11 @@ class _HomePageState extends State<HomePage> {
   //    twin label per print with no waste. Default for the 45x15/2R roll.
   LabelType _labelType = LabelType.continuous;
 
+  // 45x15/2R rolls have a see-through gap only every 30mm (per pair). Printing
+  // both twins at once (2-up) lets the printer align off that real gap, so it
+  // never drifts and never wastes the bottom label.
+  bool _twinUp = true;
+
   void _addLog(String msg) {
     if (!mounted) return;
     setState(() => _log.insert(0, msg));
@@ -165,53 +170,25 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() => _busy = true);
     try {
-      // Random numeric payload for the barcode.
-      final rnd = Random();
-      final code =
-          List.generate(8, (_) => rnd.nextInt(10).toString()).join();
-      _addLog('Barcode: $code');
-
       final w = _labelWidth;
-      final h = _labelHeight;
-      _addLog('Label: ${_widthMmCtrl.text}x${_heightMmCtrl.text} mm = ${w}x$h px');
-      final page = PrintPage(w, h);
+      final h = _labelHeight; // one twin label (e.g. 15mm = 120px)
+      final twin = _twinUp;
+      final pageH = twin ? h * 2 : h;
+      final page = PrintPage(w, pageH);
 
-      // An L-shaped tick in each corner — if all four print fully, the size
-      // matches the loaded label. Drawn with exact pixel lines (not glyphs).
-      // Inset ~1 mm so a small print-origin offset doesn't clip them; use
-      // "Calibrate Paper" to fix a larger offset.
-      const inset = 8;
-      const arm = 16;
-      _addCorner(page, inset, inset, 1, 1, arm); // top-left
-      _addCorner(page, w - 1 - inset, inset, -1, 1, arm); // top-right
-      _addCorner(page, inset, h - 1 - inset, 1, -1, arm); // bottom-left
-      _addCorner(page, w - 1 - inset, h - 1 - inset, -1, -1, arm); // bottom-right
-
-      // Code 128 barcode (bars only) ...
-      page.addBarcode(
-        code,
-        BarcodeOptions(
-          encoding: BarcodeEncoding.code128,
-          x: w ~/ 2,
-          y: 30,
-          width: (w * 0.7).round(),
-          height: 46,
-          align: HAlignment.center,
-          vAlign: VAlignment.top,
-        ),
-      );
-      // ... with the human-readable number printed underneath.
-      await page.addText(
-        code,
-        TextOptions(
-          x: w ~/ 2,
-          y: h - 18,
-          fontSize: 18,
-          fontWeight: FontWeight.bold,
-          align: HAlignment.center,
-          vAlign: VAlignment.middle,
-        ),
-      );
+      // Each twin gets its own (different) barcode. 2-up uses the real 30mm
+      // gap for alignment, so it never drifts and never leaves a blank.
+      final code1 = _randomCode();
+      await _drawLabel(page, code1, 0, w, h);
+      if (twin) {
+        final code2 = _randomCode();
+        await _drawLabel(page, code2, h, w, h);
+        _addLog('2-up: $code1 (top) + $code2 (bottom)');
+      } else {
+        _addLog('Barcode: $code1');
+      }
+      _addLog('Page ${w}x$pageH px, '
+          'mode=${twin ? "2-up/WithGaps" : _labelType.name}');
 
       // The library handles the full B1 handshake + encoding internally.
       client.stopHeartbeat();
@@ -219,7 +196,8 @@ class _HomePageState extends State<HomePage> {
       final task = client.createPrintTask(PrintOptions(
         totalPages: 1,
         density: 3,
-        labelType: _labelType,
+        // 2-up relies on the real 30mm die-cut gap for alignment.
+        labelType: twin ? LabelType.withGaps : _labelType,
         statusPollIntervalMs: 100,
         statusTimeoutMs: 8000,
       ));
@@ -238,6 +216,45 @@ class _HomePageState extends State<HomePage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  String _randomCode() =>
+      List.generate(8, (_) => Random().nextInt(10).toString()).join();
+
+  /// Draw one label (corner ticks + barcode + digits) into the band of [page]
+  /// starting at y = [oy], height [h], width [w].
+  Future<void> _drawLabel(
+      PrintPage page, String code, int oy, int w, int h) async {
+    const inset = 8;
+    const arm = 14;
+    _addCorner(page, inset, oy + inset, 1, 1, arm);
+    _addCorner(page, w - 1 - inset, oy + inset, -1, 1, arm);
+    _addCorner(page, inset, oy + h - 1 - inset, 1, -1, arm);
+    _addCorner(page, w - 1 - inset, oy + h - 1 - inset, -1, -1, arm);
+
+    page.addBarcode(
+      code,
+      BarcodeOptions(
+        encoding: BarcodeEncoding.code128,
+        x: w ~/ 2,
+        y: oy + 20,
+        width: (w * 0.7).round(),
+        height: 44,
+        align: HAlignment.center,
+        vAlign: VAlignment.top,
+      ),
+    );
+    await page.addText(
+      code,
+      TextOptions(
+        x: w ~/ 2,
+        y: oy + h - 16,
+        fontSize: 16,
+        fontWeight: FontWeight.bold,
+        align: HAlignment.center,
+        vAlign: VAlignment.middle,
+      ),
+    );
   }
 
   /// Draw an L-shaped corner tick. ([cx],[cy]) is the corner; ([dx],[dy]) the
@@ -298,12 +315,21 @@ class _HomePageState extends State<HomePage> {
                       DropdownMenuItem(
                           value: LabelType.black, child: Text('Black mark')),
                     ],
-                    onChanged: (v) =>
-                        setState(() => _labelType = v ?? _labelType),
+                    onChanged: (_twinUp || _busy)
+                        ? null
+                        : (v) => setState(() => _labelType = v ?? _labelType),
                   ),
                 ),
               ],
             ),
+          ),
+          SwitchListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+            title: const Text('Twin roll — 2 labels per feed (2-up)'),
+            subtitle: const Text('For 45×15/2R: aligns off the 30mm gap, no waste'),
+            value: _twinUp,
+            onChanged: _busy ? null : (v) => setState(() => _twinUp = v),
           ),
           Padding(
             padding: const EdgeInsets.all(12),
