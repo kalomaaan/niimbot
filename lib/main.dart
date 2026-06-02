@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' as ui;
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
@@ -37,38 +38,34 @@ class _HomePageState extends State<HomePage> {
   bool _connected = false;
   String _deviceName = 'Connected';
 
-  // Label size is entered in mm (read it off the label pack — the printer
-  // can't report physical size, only an RFID product id). B1 = 203 dpi ≈
-  // 8 dots/mm, so px = mm * 8.
+  // B1 = 203 dpi ≈ 8 dots/mm. One twin label default 45 x 15 mm.
   static const int dotsPerMm = 8;
   final _widthMmCtrl = TextEditingController(text: '45');
   final _heightMmCtrl = TextEditingController(text: '15');
 
+  // Label A (top) and B (bottom). On a 45x15/2R roll the see-through gap is
+  // every 30mm, so we always print the pair in one WithGaps job (2-up): the
+  // printer locks to the 2mm gap and prints both twins, no waste.
+  final _nameACtrl = TextEditingController(text: 'Product A');
+  final _codeACtrl = TextEditingController(text: '12345678');
+  final _nameBCtrl = TextEditingController(text: 'Product B');
+  final _codeBCtrl = TextEditingController(text: '87654321');
+  bool _twoDifferent = false; // false = same label on both twins
+
   int get _labelWidth => (int.tryParse(_widthMmCtrl.text) ?? 45) * dotsPerMm;
   int get _labelHeight => (int.tryParse(_heightMmCtrl.text) ?? 15) * dotsPerMm;
-
-  // Label feed mode.
-  //  - withGaps: printer hunts to the next die-cut gap. On 2R twin rolls the
-  //    gap is every 30mm (per pair), so it prints the top 15mm and ejects the
-  //    blank bottom 15mm.
-  //  - continuous: printer feeds exactly the page height (15mm), printing one
-  //    twin label per print with no waste. Default for the 45x15/2R roll.
-  LabelType _labelType = LabelType.continuous;
-
-  // 45x15/2R rolls have a see-through gap only every 30mm (per pair). Printing
-  // both twins at once (2-up) lets the printer align off that real gap, so it
-  // never drifts and never wastes the bottom label.
-  bool _twinUp = true;
 
   void _addLog(String msg) {
     if (!mounted) return;
     setState(() => _log.insert(0, msg));
   }
 
+  // ---- Bluetooth ----------------------------------------------------------
+
   Future<bool> _ensurePermissions() async {
     if (!Platform.isAndroid) return true;
     final info = await DeviceInfoPlugin().androidInfo;
-    final List<Permission> needed = info.version.sdkInt >= 31
+    final needed = info.version.sdkInt >= 31
         ? [Permission.bluetoothScan, Permission.bluetoothConnect]
         : [Permission.bluetooth, Permission.location];
     final statuses = await needed.request();
@@ -83,12 +80,10 @@ class _HomePageState extends State<HomePage> {
     _addLog('Scanning...');
     try {
       final found = await NiimbotBluetoothClient.listDevices(
-        timeout: const Duration(seconds: 4),
-      );
-      final connected = FlutterBluePlus.connectedDevices;
+          timeout: const Duration(seconds: 4));
       final seen = <String>{};
       final unique = <BluetoothDevice>[];
-      for (final d in [...found, ...connected]) {
+      for (final d in [...found, ...FlutterBluePlus.connectedDevices]) {
         if (seen.add(d.remoteId.str)) unique.add(d);
       }
       setState(() => _devices = unique);
@@ -112,17 +107,12 @@ class _HomePageState extends State<HomePage> {
         _connected = true;
         _deviceName = result.deviceName ?? device.platformName;
       });
-      _addLog('Connected: ${result.deviceName ?? device.platformName}. Model auto-detected.');
-      // Surface whatever the RFID tag knows about the loaded roll. It carries
-      // a product barcode + paper count + type, but NOT physical mm.
+      _addLog('Connected: $_deviceName');
       try {
         final rfid = await client.abstraction.rfidInfo();
         _addLog('RFID: present=${rfid.tagPresent} '
-            'barcode=${rfid.barCode} type=${rfid.consumablesType} '
-            'paper=${rfid.usedPaper}/${rfid.allPaper}');
-      } catch (e) {
-        _addLog('RFID read failed (non-genuine roll?): $e');
-      }
+            'type=${rfid.consumablesType} paper=${rfid.usedPaper}/${rfid.allPaper}');
+      } catch (_) {}
       client.startHeartbeat();
     } catch (e) {
       _addLog('Connect failed: $e');
@@ -131,29 +121,9 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _calibrate() async {
-    final client = _client;
-    if (client == null || !client.isConnected()) return;
-    setState(() => _busy = true);
-    _addLog('Calibrating paper (feeds a label to re-learn the gap)...');
-    try {
-      client.stopHeartbeat();
-      final ok = await client.abstraction.labelPositioningCalibration(1);
-      client.startHeartbeat();
-      _addLog('Calibrate: ${ok ? 'ok' : 'failed'}');
-    } catch (e) {
-      _client?.startHeartbeat();
-      _addLog('Calibrate failed: $e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   Future<void> _disconnect() async {
-    final client = _client;
-    if (client == null) return;
     try {
-      await client.disconnect();
+      await _client?.disconnect();
     } catch (_) {}
     setState(() {
       _client = null;
@@ -162,7 +132,9 @@ class _HomePageState extends State<HomePage> {
     _addLog('Disconnected.');
   }
 
-  Future<void> _printTestLabel() async {
+  // ---- Printing -----------------------------------------------------------
+
+  Future<void> _print() async {
     final client = _client;
     if (client == null || !client.isConnected()) {
       _addLog('Not connected.');
@@ -171,39 +143,30 @@ class _HomePageState extends State<HomePage> {
     setState(() => _busy = true);
     try {
       final w = _labelWidth;
-      final h = _labelHeight; // one twin label (e.g. 15mm = 120px)
-      final twin = _twinUp;
-      final pageH = twin ? h * 2 : h;
-      final page = PrintPage(w, pageH);
+      final h = _labelHeight;
 
-      // Each twin gets its own (different) barcode. 2-up uses the real 30mm
-      // gap for alignment, so it never drifts and never leaves a blank.
-      final code1 = _randomCode();
-      await _drawLabel(page, code1, 0, w, h);
-      if (twin) {
-        final code2 = _randomCode();
-        await _drawLabel(page, code2, h, w, h);
-        _addLog('2-up: $code1 (top) + $code2 (bottom)');
-      } else {
-        _addLog('Barcode: $code1');
-      }
-      _addLog('Page ${w}x$pageH px, '
-          'mode=${twin ? "2-up/WithGaps" : _labelType.name}');
+      final nameA = _nameACtrl.text.trim();
+      final codeA = _codeOrRandom(_codeACtrl.text);
+      final nameB = _twoDifferent ? _nameBCtrl.text.trim() : nameA;
+      final codeB = _twoDifferent ? _codeOrRandom(_codeBCtrl.text) : codeA;
 
-      // The library handles the full B1 handshake + encoding internally.
+      final page = PrintPage(w, h * 2);
+      await _drawLabel(page, nameA, codeA, 0, w, h);
+      await _drawLabel(page, nameB, codeB, h, w, h);
+      _addLog(_twoDifferent
+          ? '2-up: [$nameA:$codeA] + [$nameB:$codeB]'
+          : '2-up (same): [$nameA:$codeA] x2');
+
       client.stopHeartbeat();
       client.packetIntervalMs = 0;
-      final task = client.createPrintTask(PrintOptions(
+      final task = client.createPrintTask(const PrintOptions(
         totalPages: 1,
         density: 3,
-        // 2-up relies on the real 30mm die-cut gap for alignment.
-        labelType: twin ? LabelType.withGaps : _labelType,
+        labelType: LabelType.withGaps, // locks to the real 30mm gap
         statusPollIntervalMs: 100,
         statusTimeoutMs: 8000,
       ));
-      if (task == null) {
-        throw Exception('Printer model not detected.');
-      }
+      if (task == null) throw Exception('Printer model not detected.');
       _addLog('Printing...');
       await task.printInit();
       await task.printPage(page.toEncodedImage(), 1);
@@ -218,59 +181,113 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  String _randomCode() =>
-      List.generate(8, (_) => Random().nextInt(10).toString()).join();
+  String _codeOrRandom(String s) {
+    final t = s.trim();
+    if (t.isNotEmpty) return t;
+    return List.generate(8, (_) => Random().nextInt(10).toString()).join();
+  }
 
-  /// Draw one label (corner ticks + barcode + digits) into the band of [page]
-  /// starting at y = [oy], height [h], width [w].
+  /// One label template into the band at y=[oy], size [w] x [h]:
+  ///   • corner right-angle ticks (fit check)
+  ///   • product name, top-centered, auto-shrunk to fit the width
+  ///   • Code 128 barcode, centered
+  ///   • the number tucked tight under the bars (no wasted gap)
   Future<void> _drawLabel(
-      PrintPage page, String code, int oy, int w, int h) async {
-    const inset = 8;
+      PrintPage page, String name, String code, int oy, int w, int h) async {
+    const margin = 8;
     const arm = 14;
-    _addCorner(page, inset, oy + inset, 1, 1, arm);
-    _addCorner(page, w - 1 - inset, oy + inset, -1, 1, arm);
-    _addCorner(page, inset, oy + h - 1 - inset, 1, -1, arm);
-    _addCorner(page, w - 1 - inset, oy + h - 1 - inset, -1, -1, arm);
+    _addCorner(page, margin, oy + margin, 1, 1, arm);
+    _addCorner(page, w - 1 - margin, oy + margin, -1, 1, arm);
+    _addCorner(page, margin, oy + h - 1 - margin, 1, -1, arm);
+    _addCorner(page, w - 1 - margin, oy + h - 1 - margin, -1, -1, arm);
 
+    // Product name — shrink font until it fits the printable width.
+    if (name.isNotEmpty) {
+      final fs = _fitFontSize(name, (w - 2 * margin).toDouble(), 24, 9);
+      await page.addText(
+        name,
+        TextOptions(
+          x: w ~/ 2,
+          y: oy + 3,
+          fontSize: fs,
+          fontWeight: FontWeight.bold,
+          align: HAlignment.center,
+          vAlign: VAlignment.top,
+        ),
+      );
+    }
+
+    // Barcode bars.
+    const barTop = 32;
+    const barH = 50;
     page.addBarcode(
       code,
       BarcodeOptions(
         encoding: BarcodeEncoding.code128,
         x: w ~/ 2,
-        y: oy + 20,
-        width: (w * 0.7).round(),
-        height: 44,
+        y: oy + barTop,
+        width: (w * 0.74).round(),
+        height: barH,
         align: HAlignment.center,
         vAlign: VAlignment.top,
       ),
     );
+
+    // Number — tucked right under (slightly into) the bars, no gap.
     await page.addText(
       code,
       TextOptions(
         x: w ~/ 2,
-        y: oy + h - 16,
-        fontSize: 16,
+        y: oy + barTop + barH - 2,
+        fontSize: 15,
         fontWeight: FontWeight.bold,
         align: HAlignment.center,
-        vAlign: VAlignment.middle,
+        vAlign: VAlignment.top,
       ),
     );
   }
 
-  /// Draw an L-shaped corner tick. ([cx],[cy]) is the corner; ([dx],[dy]) the
-  /// direction (±1) the two arms extend.
+  /// Largest integer font size (between [minFont] and [maxFont]) whose single
+  /// line fits within [maxWidth] pixels.
+  int _fitFontSize(String text, double maxWidth, int maxFont, int minFont) {
+    for (int fs = maxFont; fs > minFont; fs--) {
+      final builder = ui.ParagraphBuilder(ui.ParagraphStyle(
+        fontSize: fs.toDouble(),
+        fontWeight: FontWeight.bold,
+      ))
+        ..addText(text);
+      final p = builder.build()
+        ..layout(const ui.ParagraphConstraints(width: 100000));
+      if (p.longestLine <= maxWidth) return fs;
+    }
+    return minFont;
+  }
+
+  /// L-shaped corner tick. ([cx],[cy]) corner; ([dx],[dy]) arm direction (±1).
   void _addCorner(PrintPage p, int cx, int cy, int dx, int dy, int len) {
-    p.addLine(LineOptions(x: cx, y: cy, endX: cx + dx * len, endY: cy, thickness: 2));
-    p.addLine(LineOptions(x: cx, y: cy, endX: cx, endY: cy + dy * len, thickness: 2));
+    p.addLine(
+        LineOptions(x: cx, y: cy, endX: cx + dx * len, endY: cy, thickness: 2));
+    p.addLine(
+        LineOptions(x: cx, y: cy, endX: cx, endY: cy + dy * len, thickness: 2));
   }
 
   @override
   void dispose() {
-    _widthMmCtrl.dispose();
-    _heightMmCtrl.dispose();
+    for (final c in [
+      _widthMmCtrl,
+      _heightMmCtrl,
+      _nameACtrl,
+      _codeACtrl,
+      _nameBCtrl,
+      _codeBCtrl
+    ]) {
+      c.dispose();
+    }
     _client?.disconnect();
     super.dispose();
   }
+
+  // ---- UI -----------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -278,123 +295,82 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(title: const Text('NIIMBOT B1')),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _widthMmCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                        labelText: 'Width (mm)', isDense: true),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: _heightMmCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                        labelText: 'Height (mm)', isDense: true),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField<LabelType>(
-                    value: _labelType,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                        labelText: 'Feed', isDense: true),
-                    items: const [
-                      DropdownMenuItem(
-                          value: LabelType.continuous,
-                          child: Text('Continuous')),
-                      DropdownMenuItem(
-                          value: LabelType.perforated,
-                          child: Text('Perforated')),
-                      DropdownMenuItem(
-                          value: LabelType.withGaps, child: Text('Gaps')),
-                      DropdownMenuItem(
-                          value: LabelType.black, child: Text('Black mark')),
-                    ],
-                    onChanged: (_twinUp || _busy)
-                        ? null
-                        : (v) => setState(() => _labelType = v ?? _labelType),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          SwitchListTile(
-            dense: true,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-            title: const Text('Twin roll — 2 labels per feed (2-up)'),
-            subtitle: const Text('For 45×15/2R: aligns off the 30mm gap, no waste'),
-            value: _twinUp,
-            onChanged: _busy ? null : (v) => setState(() => _twinUp = v),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _busy ? null : _scan,
-                    icon: const Icon(Icons.bluetooth_searching),
-                    label: const Text('Scan'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed:
-                        (_busy || !_connected) ? null : _printTestLabel,
-                    icon: const Icon(Icons.print),
-                    label: const Text('Print Test Label'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (_connected)
-            ListTile(
-              leading: const Icon(Icons.bluetooth_connected, color: Colors.teal),
-              title: Text(_deviceName),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  TextButton(
-                    onPressed: _busy ? null : _calibrate,
-                    child: const Text('Calibrate'),
+                  Row(children: [
+                    Expanded(child: _numField(_widthMmCtrl, 'Width (mm)')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _numField(_heightMmCtrl, 'Height (mm)')),
+                  ]),
+                  const SizedBox(height: 8),
+                  _textField(_nameACtrl, 'Product name (top)'),
+                  _textField(_codeACtrl, 'Barcode (top)'),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Two different labels (top / bottom)'),
+                    subtitle: const Text(
+                        'Off = same label printed on both twins'),
+                    value: _twoDifferent,
+                    onChanged:
+                        _busy ? null : (v) => setState(() => _twoDifferent = v),
                   ),
-                  TextButton(
-                    onPressed: _busy ? null : _disconnect,
-                    child: const Text('Disconnect'),
-                  ),
-                ],
-              ),
-            ),
-          if (!_connected)
-            Expanded(
-              flex: 2,
-              child: ListView(
-                children: _devices
-                    .map((d) => ListTile(
+                  if (_twoDifferent) ...[
+                    _textField(_nameBCtrl, 'Product name (bottom)'),
+                    _textField(_codeBCtrl, 'Barcode (bottom)'),
+                  ],
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _busy ? null : _scan,
+                        icon: const Icon(Icons.bluetooth_searching),
+                        label: const Text('Scan'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: (_busy || !_connected) ? null : _print,
+                        icon: const Icon(Icons.print),
+                        label: const Text('Print'),
+                      ),
+                    ),
+                  ]),
+                  if (_connected)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.bluetooth_connected,
+                          color: Colors.teal),
+                      title: Text(_deviceName),
+                      trailing: TextButton(
+                        onPressed: _busy ? null : _disconnect,
+                        child: const Text('Disconnect'),
+                      ),
+                    ),
+                  if (!_connected)
+                    ..._devices.map((d) => ListTile(
+                          contentPadding: EdgeInsets.zero,
                           leading: const Icon(Icons.print_outlined),
                           title: Text(d.platformName.isEmpty
                               ? '(unnamed)'
                               : d.platformName),
                           subtitle: Text(d.remoteId.str),
                           onTap: _busy ? null : () => _connect(d),
-                        ))
-                    .toList(),
+                        )),
+                ],
               ),
             ),
+          ),
           const Divider(height: 1),
-          Expanded(
-            flex: 3,
+          SizedBox(
+            height: 150,
             child: Container(
+              width: double.infinity,
               color: Colors.black,
               padding: const EdgeInsets.all(8),
               child: ListView(
@@ -412,4 +388,18 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+
+  Widget _numField(TextEditingController c, String label) => TextField(
+        controller: c,
+        keyboardType: TextInputType.number,
+        decoration: InputDecoration(labelText: label, isDense: true),
+      );
+
+  Widget _textField(TextEditingController c, String label) => Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: TextField(
+          controller: c,
+          decoration: InputDecoration(labelText: label, isDense: true),
+        ),
+      );
 }

@@ -3,15 +3,20 @@
 Minimal Android app: scan for a NIIMBOT B1 over Bluetooth LE, connect, and
 print a test label. No backend, no accounts — sideload the APK and print.
 
-Enter the label size in **mm** in the app (default 45 × 15; px = mm × 8 at
-203 dpi). The printer cannot report its own label size — the RFID tag on
-genuine rolls only carries a product barcode + paper count, not dimensions —
-so read the size off the label pack. The app logs the RFID info on connect.
+Enter the label size in **mm** (default 45 × 15; px = mm × 8 at 203 dpi) and
+the product name + barcode, then print. Each label has:
+- **product name**, top-centered, auto-shrunk to fit the width
+- a **Code 128 barcode** with the number tucked tight underneath
+- an **L-tick in each corner** — if all four print, the size matches the roll
 
-The test label contains:
-- a **Code 128 barcode** of a random 8-digit number, with the digits below it
-- an **L-tick in each corner** — if all four print fully, the entered size
-  matches the loaded label.
+### 2R twin rolls (e.g. 45×15/2R)
+These have a see-through gap only every **30 mm** (per pair); the split between
+the two twins is a perforation the sensor can't see. So the app always prints
+**2-up**: one `WithGaps` job that locks to the 30 mm gap and fills both twins —
+no drift, no waste. Toggle **Two different labels** to print A on top and B on
+the bottom, or leave it off to print the same label twice. (True single-15 mm
+printing isn't possible on this media — the firmware exposes no per-perforation
+feed; use a 1-up roll for one-at-a-time labels.)
 
 ## How it works
 
