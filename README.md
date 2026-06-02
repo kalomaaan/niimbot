@@ -10,7 +10,16 @@ The test label (hardcoded **45 × 15 mm**, 360 × 120 px at 203 dpi) contains:
 
 ## How it works
 
-The B1 speaks a simple framed serial protocol over a single BLE characteristic:
+Printing is done through the [`niim_blue_flutter`](https://pub.dev/packages/niim_blue_flutter)
+package (a Dart port of niimbluelib). It picks the correct **B1 print task**,
+performs the request/response **handshake** the printer needs between each
+setup packet (the missing piece when driving the protocol by hand — without it
+the B1 just feeds a blank label), and encodes the page. The app only builds the
+label (`PrintPage` with `addBarcode` + `addText`) and calls
+`printInit → printPage → waitForFinished`.
+
+For reference, the underlying B1 protocol is a framed serial protocol over a
+single BLE characteristic:
 
 ```
 55 55 | type | len | data... | checksum | AA AA      checksum = XOR(type, len, data)
