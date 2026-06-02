@@ -3,10 +3,15 @@
 Minimal Android app: scan for a NIIMBOT B1 over Bluetooth LE, connect, and
 print a test label. No backend, no accounts — sideload the APK and print.
 
-The test label (hardcoded **45 × 15 mm**, 360 × 120 px at 203 dpi) contains:
-- a **Code 39 barcode** of a random 8-digit number, with the digits printed below it
-- a **star in each corner** — if all four print, the printer detected the full
-  label size correctly.
+Enter the label size in **mm** in the app (default 45 × 15; px = mm × 8 at
+203 dpi). The printer cannot report its own label size — the RFID tag on
+genuine rolls only carries a product barcode + paper count, not dimensions —
+so read the size off the label pack. The app logs the RFID info on connect.
+
+The test label contains:
+- a **Code 128 barcode** of a random 8-digit number, with the digits below it
+- an **L-tick in each corner** — if all four print fully, the entered size
+  matches the loaded label.
 
 ## How it works
 

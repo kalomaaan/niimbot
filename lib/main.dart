@@ -37,11 +37,15 @@ class _HomePageState extends State<HomePage> {
   bool _connected = false;
   String _deviceName = 'Connected';
 
-  // Paper hardcoded to 45 x 15 mm. B1 = 203 dpi = 8 dots/mm:
-  //   width  = 45 mm * 8 = 360 px (across the printhead)
-  //   height = 15 mm * 8 = 120 px (feed direction)
-  static const int labelWidth = 360;
-  static const int labelHeight = 120;
+  // Label size is entered in mm (read it off the label pack — the printer
+  // can't report physical size, only an RFID product id). B1 = 203 dpi ≈
+  // 8 dots/mm, so px = mm * 8.
+  static const int dotsPerMm = 8;
+  final _widthMmCtrl = TextEditingController(text: '45');
+  final _heightMmCtrl = TextEditingController(text: '15');
+
+  int get _labelWidth => (int.tryParse(_widthMmCtrl.text) ?? 45) * dotsPerMm;
+  int get _labelHeight => (int.tryParse(_heightMmCtrl.text) ?? 15) * dotsPerMm;
 
   void _addLog(String msg) {
     if (!mounted) return;
@@ -90,13 +94,23 @@ class _HomePageState extends State<HomePage> {
       final client = NiimbotBluetoothClient();
       client.setDevice(device);
       final result = await client.connect();
-      client.startHeartbeat();
       setState(() {
         _client = client;
         _connected = true;
         _deviceName = result.deviceName ?? device.platformName;
       });
       _addLog('Connected: ${result.deviceName ?? device.platformName}. Model auto-detected.');
+      // Surface whatever the RFID tag knows about the loaded roll. It carries
+      // a product barcode + paper count + type, but NOT physical mm.
+      try {
+        final rfid = await client.abstraction.rfidInfo();
+        _addLog('RFID: present=${rfid.tagPresent} '
+            'barcode=${rfid.barCode} type=${rfid.consumablesType} '
+            'paper=${rfid.usedPaper}/${rfid.allPaper}');
+      } catch (e) {
+        _addLog('RFID read failed (non-genuine roll?): $e');
+      }
+      client.startHeartbeat();
     } catch (e) {
       _addLog('Connect failed: $e');
     } finally {
@@ -131,27 +145,28 @@ class _HomePageState extends State<HomePage> {
           List.generate(8, (_) => rnd.nextInt(10).toString()).join();
       _addLog('Barcode: $code');
 
-      final page = PrintPage(labelWidth, labelHeight);
+      final w = _labelWidth;
+      final h = _labelHeight;
+      _addLog('Label: ${_widthMmCtrl.text}x${_heightMmCtrl.text} mm = ${w}x$h px');
+      final page = PrintPage(w, h);
 
-      // A star in each corner — confirms the printer detected the full
-      // 45 x 15 mm label area.
-      await page.addText('*',
-          const TextOptions(x: 12, y: 8, fontSize: 22, align: HAlignment.left, vAlign: VAlignment.top));
-      await page.addText('*',
-          const TextOptions(x: labelWidth - 12, y: 8, fontSize: 22, align: HAlignment.right, vAlign: VAlignment.top));
-      await page.addText('*',
-          const TextOptions(x: 12, y: labelHeight - 8, fontSize: 22, align: HAlignment.left, vAlign: VAlignment.bottom));
-      await page.addText('*',
-          const TextOptions(x: labelWidth - 12, y: labelHeight - 8, fontSize: 22, align: HAlignment.right, vAlign: VAlignment.bottom));
+      // An L-shaped tick in each corner — if all four print fully, the size
+      // matches the loaded label. Drawn with exact pixel lines (not glyphs).
+      const inset = 4;
+      const arm = 16;
+      _addCorner(page, inset, inset, 1, 1, arm); // top-left
+      _addCorner(page, w - 1 - inset, inset, -1, 1, arm); // top-right
+      _addCorner(page, inset, h - 1 - inset, 1, -1, arm); // bottom-left
+      _addCorner(page, w - 1 - inset, h - 1 - inset, -1, -1, arm); // bottom-right
 
       // Code 128 barcode (bars only) ...
       page.addBarcode(
         code,
-        const BarcodeOptions(
+        BarcodeOptions(
           encoding: BarcodeEncoding.code128,
-          x: labelWidth ~/ 2,
+          x: w ~/ 2,
           y: 30,
-          width: 250,
+          width: (w * 0.7).round(),
           height: 46,
           align: HAlignment.center,
           vAlign: VAlignment.top,
@@ -160,9 +175,9 @@ class _HomePageState extends State<HomePage> {
       // ... with the human-readable number printed underneath.
       await page.addText(
         code,
-        const TextOptions(
-          x: labelWidth ~/ 2,
-          y: 96,
+        TextOptions(
+          x: w ~/ 2,
+          y: h - 18,
           fontSize: 18,
           fontWeight: FontWeight.bold,
           align: HAlignment.center,
@@ -197,8 +212,17 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// Draw an L-shaped corner tick. ([cx],[cy]) is the corner; ([dx],[dy]) the
+  /// direction (±1) the two arms extend.
+  void _addCorner(PrintPage p, int cx, int cy, int dx, int dy, int len) {
+    p.addLine(LineOptions(x: cx, y: cy, endX: cx + dx * len, endY: cy, thickness: 2));
+    p.addLine(LineOptions(x: cx, y: cy, endX: cx, endY: cy + dy * len, thickness: 2));
+  }
+
   @override
   void dispose() {
+    _widthMmCtrl.dispose();
+    _heightMmCtrl.dispose();
     _client?.disconnect();
     super.dispose();
   }
@@ -209,6 +233,30 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(title: const Text('NIIMBOT B1')),
       body: Column(
         children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _widthMmCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                        labelText: 'Width (mm)', isDense: true),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _heightMmCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                        labelText: 'Height (mm)', isDense: true),
+                  ),
+                ),
+              ],
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.all(12),
             child: Row(
