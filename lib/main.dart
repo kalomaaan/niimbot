@@ -94,9 +94,9 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _client = client;
         _connected = true;
-        _deviceName = result.deviceName;
+        _deviceName = result.deviceName ?? device.platformName;
       });
-      _addLog('Connected: ${result.deviceName}. Model auto-detected.');
+      _addLog('Connected: ${result.deviceName ?? device.platformName}. Model auto-detected.');
     } catch (e) {
       _addLog('Connect failed: $e');
     } finally {
