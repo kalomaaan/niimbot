@@ -311,6 +311,9 @@ class _HomePageState extends State<HomePage> {
                           value: LabelType.continuous,
                           child: Text('Continuous')),
                       DropdownMenuItem(
+                          value: LabelType.perforated,
+                          child: Text('Perforated')),
+                      DropdownMenuItem(
                           value: LabelType.withGaps, child: Text('Gaps')),
                       DropdownMenuItem(
                           value: LabelType.black, child: Text('Black mark')),
