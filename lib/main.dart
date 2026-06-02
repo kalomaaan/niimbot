@@ -118,6 +118,24 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _calibrate() async {
+    final client = _client;
+    if (client == null || !client.isConnected()) return;
+    setState(() => _busy = true);
+    _addLog('Calibrating paper (feeds a label to re-learn the gap)...');
+    try {
+      client.stopHeartbeat();
+      final ok = await client.abstraction.labelPositioningCalibration(1);
+      client.startHeartbeat();
+      _addLog('Calibrate: ${ok ? 'ok' : 'failed'}');
+    } catch (e) {
+      _client?.startHeartbeat();
+      _addLog('Calibrate failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _disconnect() async {
     final client = _client;
     if (client == null) return;
@@ -152,7 +170,9 @@ class _HomePageState extends State<HomePage> {
 
       // An L-shaped tick in each corner — if all four print fully, the size
       // matches the loaded label. Drawn with exact pixel lines (not glyphs).
-      const inset = 4;
+      // Inset ~1 mm so a small print-origin offset doesn't clip them; use
+      // "Calibrate Paper" to fix a larger offset.
+      const inset = 8;
       const arm = 16;
       _addCorner(page, inset, inset, 1, 1, arm); // top-left
       _addCorner(page, w - 1 - inset, inset, -1, 1, arm); // top-right
@@ -284,9 +304,18 @@ class _HomePageState extends State<HomePage> {
             ListTile(
               leading: const Icon(Icons.bluetooth_connected, color: Colors.teal),
               title: Text(_deviceName),
-              trailing: TextButton(
-                onPressed: _busy ? null : _disconnect,
-                child: const Text('Disconnect'),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: _busy ? null : _calibrate,
+                    child: const Text('Calibrate'),
+                  ),
+                  TextButton(
+                    onPressed: _busy ? null : _disconnect,
+                    child: const Text('Disconnect'),
+                  ),
+                ],
               ),
             ),
           if (!_connected)
