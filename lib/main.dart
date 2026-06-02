@@ -47,6 +47,14 @@ class _HomePageState extends State<HomePage> {
   int get _labelWidth => (int.tryParse(_widthMmCtrl.text) ?? 45) * dotsPerMm;
   int get _labelHeight => (int.tryParse(_heightMmCtrl.text) ?? 15) * dotsPerMm;
 
+  // Label feed mode.
+  //  - withGaps: printer hunts to the next die-cut gap. On 2R twin rolls the
+  //    gap is every 30mm (per pair), so it prints the top 15mm and ejects the
+  //    blank bottom 15mm.
+  //  - continuous: printer feeds exactly the page height (15mm), printing one
+  //    twin label per print with no waste. Default for the 45x15/2R roll.
+  LabelType _labelType = LabelType.continuous;
+
   void _addLog(String msg) {
     if (!mounted) return;
     setState(() => _log.insert(0, msg));
@@ -208,10 +216,10 @@ class _HomePageState extends State<HomePage> {
       // The library handles the full B1 handshake + encoding internally.
       client.stopHeartbeat();
       client.packetIntervalMs = 0;
-      final task = client.createPrintTask(const PrintOptions(
+      final task = client.createPrintTask(PrintOptions(
         totalPages: 1,
         density: 3,
-        labelType: LabelType.withGaps,
+        labelType: _labelType,
         statusPollIntervalMs: 100,
         statusTimeoutMs: 8000,
       ));
@@ -272,6 +280,26 @@ class _HomePageState extends State<HomePage> {
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                         labelText: 'Height (mm)', isDense: true),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: DropdownButtonFormField<LabelType>(
+                    value: _labelType,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                        labelText: 'Feed', isDense: true),
+                    items: const [
+                      DropdownMenuItem(
+                          value: LabelType.continuous,
+                          child: Text('Continuous')),
+                      DropdownMenuItem(
+                          value: LabelType.withGaps, child: Text('Gaps')),
+                      DropdownMenuItem(
+                          value: LabelType.black, child: Text('Black mark')),
+                    ],
+                    onChanged: (v) =>
+                        setState(() => _labelType = v ?? _labelType),
                   ),
                 ),
               ],
