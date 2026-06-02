@@ -188,18 +188,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// One label template into the band at y=[oy], size [w] x [h]:
-  ///   • corner right-angle ticks (fit check)
   ///   • product name, top-centered, auto-shrunk to fit the width
   ///   • Code 128 barcode, centered
   ///   • the number tucked tight under the bars (no wasted gap)
   Future<void> _drawLabel(
       PrintPage page, String name, String code, int oy, int w, int h) async {
     const margin = 8;
-    const arm = 14;
-    _addCorner(page, margin, oy + margin, 1, 1, arm);
-    _addCorner(page, w - 1 - margin, oy + margin, -1, 1, arm);
-    _addCorner(page, margin, oy + h - 1 - margin, 1, -1, arm);
-    _addCorner(page, w - 1 - margin, oy + h - 1 - margin, -1, -1, arm);
 
     // Product name — shrink font until it fits the printable width.
     if (name.isNotEmpty) {
@@ -261,14 +255,6 @@ class _HomePageState extends State<HomePage> {
       if (p.longestLine <= maxWidth) return fs;
     }
     return minFont;
-  }
-
-  /// L-shaped corner tick. ([cx],[cy]) corner; ([dx],[dy]) arm direction (±1).
-  void _addCorner(PrintPage p, int cx, int cy, int dx, int dy, int len) {
-    p.addLine(
-        LineOptions(x: cx, y: cy, endX: cx + dx * len, endY: cy, thickness: 2));
-    p.addLine(
-        LineOptions(x: cx, y: cy, endX: cx, endY: cy + dy * len, thickness: 2));
   }
 
   @override
