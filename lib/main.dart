@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -37,10 +38,11 @@ class _HomePageState extends State<HomePage> {
   NiimbotPrinter? _printer;
   bool _busy = false;
 
-  // Label canvas size. Width must be a multiple of 8. B1 head is ~384 px max;
-  // 320 x 96 suits a small "hello world" test label.
-  static const int labelWidth = 320;
-  static const int labelHeight = 96;
+  // Paper is hardcoded to 45 x 15 mm. B1 = 203 dpi = 8 dots/mm, so:
+  //   width  = 45 mm * 8 = 360 px (across the printhead)
+  //   height = 15 mm * 8 = 120 px (feed direction)
+  static const int labelWidth = 360;
+  static const int labelHeight = 120;
 
   void _addLog(String msg) {
     if (!mounted) return;
@@ -127,12 +129,17 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _printHelloWorld() async {
+  Future<void> _printTestLabel() async {
     final printer = _printer;
     if (printer == null) return;
     setState(() => _busy = true);
     try {
-      final rows = await _renderText('HELLO\nWORLD', labelWidth, labelHeight);
+      // Random Code 39 numeric payload.
+      final rnd = Random();
+      final code =
+          List.generate(8, (_) => rnd.nextInt(10).toString()).join();
+      _addLog('Barcode: $code');
+      final rows = await _renderLabel(code, labelWidth, labelHeight);
       await printer.printImage(rows);
     } catch (e) {
       _addLog('Print failed: $e');
@@ -141,26 +148,54 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// Rasterize centered text to a 1-bit grid. true => black (printed) dot.
-  Future<List<List<bool>>> _renderText(
-      String text, int width, int height) async {
+  /// Draw the test label (4 corner stars + Code 39 barcode + digits) and
+  /// rasterize to a 1-bit grid. true => black (printed) dot.
+  Future<List<List<bool>>> _renderLabel(
+      String code, int width, int height) async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
+    final w = width.toDouble();
+    final h = height.toDouble();
+    final black = Paint()..color = const Color(0xFF000000);
     canvas.drawRect(
-      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
-      Paint()..color = const Color(0xFFFFFFFF),
-    );
-    final builder = ui.ParagraphBuilder(ui.ParagraphStyle(
+        Rect.fromLTWH(0, 0, w, h), Paint()..color = const Color(0xFFFFFFFF));
+
+    // Corner stars — confirm the printer detected the full label area.
+    const inset = 10.0;
+    const starR = 6.0;
+    _drawStar(canvas, const Offset(inset, inset), starR, black);
+    _drawStar(canvas, Offset(w - inset, inset), starR, black);
+    _drawStar(canvas, Offset(inset, h - inset), starR, black);
+    _drawStar(canvas, Offset(w - inset, h - inset), starR, black);
+
+    // Code 39 barcode, centered horizontally.
+    final modules = _code39Modules(code); // list of (isBar, widthInModules)
+    final totalModules =
+        modules.fold<int>(0, (sum, m) => sum + m.$2);
+    final barAreaW = w * 0.66;
+    final moduleW = barAreaW / totalModules;
+    final barHeight = h * 0.42;
+    final barTop = h * 0.16;
+    var x = (w - barAreaW) / 2;
+    for (final m in modules) {
+      final mw = m.$2 * moduleW;
+      if (m.$1) {
+        canvas.drawRect(Rect.fromLTWH(x, barTop, mw, barHeight), black);
+      }
+      x += mw;
+    }
+
+    // Human-readable digits below the bars.
+    final pb = ui.ParagraphBuilder(ui.ParagraphStyle(
       textAlign: TextAlign.center,
-      fontSize: 40,
+      fontSize: 22,
       fontWeight: FontWeight.bold,
     ))
       ..pushStyle(ui.TextStyle(color: const Color(0xFF000000)))
-      ..addText(text);
-    final paragraph = builder.build()
-      ..layout(ui.ParagraphConstraints(width: width.toDouble()));
-    canvas.drawParagraph(
-        paragraph, Offset(0, (height - paragraph.height) / 2));
+      ..addText(code);
+    final paragraph = pb.build()
+      ..layout(ui.ParagraphConstraints(width: w));
+    canvas.drawParagraph(paragraph, Offset(0, barTop + barHeight + 4));
 
     final image = await recorder.endRecording().toImage(width, height);
     final bytes =
@@ -168,12 +203,47 @@ class _HomePageState extends State<HomePage> {
     final px = bytes!.buffer.asUint8List();
 
     return List.generate(height, (y) {
-      return List.generate(width, (x) {
-        final i = (y * width + x) * 4;
+      return List.generate(width, (xx) {
+        final i = (y * width + xx) * 4;
         final lum = (px[i] + px[i + 1] + px[i + 2]) / 3;
         return lum < 128; // dark pixel => print
       });
     });
+  }
+
+  /// Draw a small filled 5-point star centered at [c].
+  void _drawStar(Canvas canvas, Offset c, double r, Paint paint) {
+    final path = Path();
+    for (var i = 0; i < 10; i++) {
+      final radius = i.isEven ? r : r / 2.3;
+      final angle = -pi / 2 + i * pi / 5;
+      final p = c + Offset(cos(angle) * radius, sin(angle) * radius);
+      i == 0 ? path.moveTo(p.dx, p.dy) : path.lineTo(p.dx, p.dy);
+    }
+    path.close();
+    canvas.drawPath(path, paint);
+  }
+
+  // Code 39: 9 elements per char (bar/space alternating, starting with a bar);
+  // 'n' = narrow (1 module), 'w' = wide (2 modules). Chars are wrapped in the
+  // '*' start/stop guard and separated by a 1-module space.
+  static const Map<String, String> _code39 = {
+    '0': 'nnnwwnwnn', '1': 'wnnwnnnnw', '2': 'nnwwnnnnw', '3': 'wnwwnnnnn',
+    '4': 'nnnwwnnnw', '5': 'wnnwwnnnn', '6': 'nnwwwnnnn', '7': 'nnnwnnwnw',
+    '8': 'wnnwnnwnn', '9': 'nnwwnnwnn', '*': 'nwnnwnwnn',
+  };
+
+  List<(bool, int)> _code39Modules(String data) {
+    final chars = '*$data*';
+    final out = <(bool, int)>[];
+    for (var ci = 0; ci < chars.length; ci++) {
+      final pattern = _code39[chars[ci]]!;
+      for (var i = 0; i < pattern.length; i++) {
+        out.add((i.isEven, pattern[i] == 'w' ? 2 : 1));
+      }
+      if (ci != chars.length - 1) out.add((false, 1)); // inter-char gap
+    }
+    return out;
   }
 
   String _hex(List<int> b) =>
@@ -207,9 +277,9 @@ class _HomePageState extends State<HomePage> {
                 Expanded(
                   child: FilledButton.icon(
                     onPressed:
-                        (_busy || !connected) ? null : _printHelloWorld,
+                        (_busy || !connected) ? null : _printTestLabel,
                     icon: const Icon(Icons.print),
-                    label: const Text('Print Hello World'),
+                    label: const Text('Print Test Label'),
                   ),
                 ),
               ],

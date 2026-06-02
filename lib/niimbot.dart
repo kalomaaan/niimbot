@@ -41,26 +41,35 @@ class NiimbotPrinter {
       : _log = log,
         _mtu = mtu;
 
+  /// B1 printhead resolution in pixels (drives the per-row count chunking).
+  static const int printheadPixels = 384;
+
   set mtu(int value) => _mtu = value;
 
   /// Print a 1-bit image. [rows] is row-major: rows[y][x] == true => black dot.
   /// Width (rows[y].length) must be a multiple of 8.
+  ///
+  /// Packet sequence matches niimbluelib's B1PrintTask exactly:
+  ///   setDensity, setLabelType, printStart(7b),
+  ///   pageStart, setPageSize(6b), <bitmap rows>, pageEnd, printEnd.
+  /// Using the 1-byte printStart / 4-byte page size (the D11 forms) makes the
+  /// B1 feed a *blank* label — which is what bit us the first time.
   Future<void> printImage(List<List<bool>> rows, {int density = 3}) async {
     final height = rows.length;
     final width = rows.isEmpty ? 0 : rows.first.length;
 
-    _log('Configuring: density=$density, label type=1');
-    await _send(NiimbotPacket(0x21, [density])); // SET_LABEL_DENSITY
-    await _send(NiimbotPacket(0x23, [1])); // SET_LABEL_TYPE (1 = gap/with-gaps)
-    await _send(NiimbotPacket(0x01, [1])); // START_PRINT
-    await _send(NiimbotPacket(0x03, [1])); // START_PAGE_PRINT
+    _log('Init: density=$density, type=WithGaps, 7-byte printStart');
+    await _send(NiimbotPacket(0x21, [density])); // SetDensity
+    await _send(NiimbotPacket(0x23, [1])); // SetLabelType (1 = WithGaps)
+    // printStart7b: totalPages=1 (u16 BE), 4 reserved zeros, pageColor=0.
+    await _send(NiimbotPacket(0x01, [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]));
 
-    // SET_DIMENSION: rows (height) then cols (width), big-endian u16 each.
+    await _send(NiimbotPacket(0x03, const [])); // PageStart (command only)
+    // setPageSize6b: rows (height), cols (width), copies — big-endian u16 each.
     await _send(NiimbotPacket(0x13, [
-      (height >> 8) & 0xFF,
-      height & 0xFF,
-      (width >> 8) & 0xFF,
-      width & 0xFF,
+      (height >> 8) & 0xFF, height & 0xFF, //
+      (width >> 8) & 0xFF, width & 0xFF, //
+      0x00, 0x01, // copies = 1
     ]));
 
     _log('Sending $height rows ($width px wide)...');
@@ -68,14 +77,16 @@ class NiimbotPrinter {
       await _send(_encodeRow(y, rows[y]));
     }
 
-    await _send(NiimbotPacket(0xE3, [1])); // END_PAGE_PRINT
+    await _send(NiimbotPacket(0xE3, const [])); // PageEnd (command only)
     await Future.delayed(const Duration(milliseconds: 300));
-    await _send(NiimbotPacket(0xF3, [1])); // END_PRINT
+    await _send(NiimbotPacket(0xF3, const [])); // PrintEnd (command only)
     _log('Print job sent.');
   }
 
   /// Encode one image row into a 0x85 (PrintBitmapRow) packet.
   /// Bits are packed MSB-first: x=0 -> bit 7 of the first byte.
+  /// Header: y (u16 BE), 3 black-pixel "part" counts, repeat = 1.
+  /// The B1 needs the real per-third counts; zeros make it drop the row.
   NiimbotPacket _encodeRow(int y, List<bool> row) {
     final width = row.length;
     final lineBytes = Uint8List((width + 7) ~/ 8);
@@ -84,9 +95,29 @@ class NiimbotPrinter {
         lineBytes[x >> 3] |= 0x80 >> (x & 7);
       }
     }
-    // Header: y (u16 BE), 3 "black count" bytes (0 is accepted), repeat = 1.
-    final header = <int>[(y >> 8) & 0xFF, y & 0xFF, 0, 0, 0, 1];
+    // Split the row into three equal byte-chunks and count set bits in each.
+    final chunk = printheadPixels ~/ 8 ~/ 3; // 16 bytes for a 384px head
+    final parts = <int>[0, 0, 0];
+    for (var b = 0; b < lineBytes.length; b++) {
+      final idx = chunk > 0 ? b ~/ chunk : 0;
+      if (idx > 2) continue;
+      parts[idx] += _popcount(lineBytes[b]);
+    }
+    for (var i = 0; i < 3; i++) {
+      if (parts[i] > 255) parts[i] = 255;
+    }
+    final header = <int>[(y >> 8) & 0xFF, y & 0xFF, parts[0], parts[1], parts[2], 1];
     return NiimbotPacket(0x85, [...header, ...lineBytes]);
+  }
+
+  int _popcount(int v) {
+    var c = 0;
+    var x = v;
+    while (x != 0) {
+      c += x & 1;
+      x >>= 1;
+    }
+    return c;
   }
 
   /// Write a packet, splitting across the negotiated MTU. The printer
